@@ -1,0 +1,80 @@
+-- 创建数据库（可选）
+CREATE DATABASE IF NOT EXISTS dating_app_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE dating_app_db;
+
+-- 1. users: 基础账号信息
+CREATE TABLE `users` (
+    `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `username` VARCHAR(50) NOT NULL UNIQUE COMMENT '用户名',
+    `password_hash` VARCHAR(255) NOT NULL COMMENT '加密后的密码',
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- 2. profiles: 详细资料 (与 users 是一对一关系)
+CREATE TABLE `profiles` (
+    `user_id` BIGINT UNSIGNED PRIMARY KEY,
+    `avatar_url` VARCHAR(255) COMMENT '头像URL',
+    `bio` TEXT COMMENT '个人简介',
+    `gender` ENUM('male', 'female', 'other') DEFAULT 'other' COMMENT '性别',
+    `age` TINYINT UNSIGNED COMMENT '年龄',
+    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- 3. swipes: 滑动记录
+CREATE TABLE `swipes` (
+    `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `swiper_id` BIGINT UNSIGNED NOT NULL COMMENT '滑动者ID',
+    `swiped_id` BIGINT UNSIGNED NOT NULL COMMENT '被滑动者ID',
+    `action` ENUM('like', 'ignore') NOT NULL COMMENT '滑动行为',
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`swiper_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    FOREIGN KEY (`swiped_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    -- 索引优化：防止重复滑动同一人
+    UNIQUE KEY `unique_swipe` (`swiper_id`, `swiped_id`)
+) ENGINE=InnoDB;
+
+-- 4. matches: 匹配成功记录
+CREATE TABLE `matches` (
+    `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `user1_id` BIGINT UNSIGNED NOT NULL,
+    `user2_id` BIGINT UNSIGNED NOT NULL,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`user1_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    FOREIGN KEY (`user2_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    -- 索引优化：确保匹配的唯一性，不论顺序
+    CONSTRAINT `check_user_order` CHECK (`user1_id` < `user2_id`)
+) ENGINE=InnoDB;
+
+-- 5. messages: 聊天消息
+CREATE TABLE `messages` (
+    `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `sender_id` BIGINT UNSIGNED NOT NULL,
+    `receiver_id` BIGINT UNSIGNED NOT NULL,
+    `content` TEXT NOT NULL COMMENT '消息内容',
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`sender_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    FOREIGN KEY (`receiver_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO `users` (`username`, `password_hash`) 
+VALUES ('tech_pioneer', 'sha256$hashed_password_string_123');
+
+INSERT INTO `profiles` (`user_id`, `avatar_url`, `bio`, `gender`, `age`) 
+VALUES (1, 'https://example.com/avatars/u1.jpg', '热爱编程与旅行的工程师', 'male', 28);
+
+INSERT INTO `users` (`username`, `password_hash`) VALUES ('travel_lover', 'sha256$hashed_password_string_456');
+INSERT INTO `profiles` (`user_id`, `avatar_url`, `bio`, `gender`, `age`) 
+VALUES (2, 'https://example.com/avatars/u2.jpg', '寻找一起探索世界的人', 'female', 26);
+
+INSERT INTO `swipes` (`swiper_id`, `swiped_id`, `action`) 
+VALUES (1, 2, 'like');
+
+INSERT INTO `matches` (`user1_id`, `user2_id`) 
+VALUES (1, 2);
+
+INSERT INTO `messages` (`sender_id`, `receiver_id`, `content`) 
+VALUES (1, 2, '嘿！很高兴匹配到你，你也喜欢去西藏旅游吗？');
+
+show tables;
+describe `users`;
+select *from `messages`;
