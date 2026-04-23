@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Heart, X, MessageCircle, User, Zap, Star, Send, ChevronLeft, RefreshCw, Flame, Settings, Shield, LogOut, Mail, Lock, ChevronRight, PlusSquare, Trash2, Hash } from 'lucide-react';
-
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Heart, X, MessageCircle, User, Zap, Star, Send, ChevronLeft, RefreshCw, Flame, Settings, Shield, LogOut, Mail, Lock, ChevronRight, PlusSquare, Trash2, Hash, Camera } from 'lucide-react';
 // --- API 辅助函数 ---
 const API = {
   get: (url) => fetch(url).then(r => r.json()),
@@ -32,6 +31,7 @@ export default function App() {
   const [isPublishing, setIsPublishing] = useState(false); 
   const [newMomentText, setNewMomentText] = useState(''); 
   const [newMomentTag, setNewMomentTag] = useState(''); 
+  const [newMomentImage, setNewMomentImage] = useState(null);
   const [activeTagFilter, setActiveTagFilter] = useState(null); 
   const [newComment, setNewComment] = useState(''); 
   const [profileSubView, setProfileSubView] = useState(null); 
@@ -47,6 +47,13 @@ export default function App() {
   const [showMatchAnimation, setShowMatchAnimation] = useState(null);
   const [inputText, setInputText] = useState('');
   const [leaving, setLeaving] = useState(false);
+  const [graphData, setGraphData] = useState(null);
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [hoveredNode, setHoveredNode] = useState(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+
+  // 上传文件状态
+  const [uploadingFile, setUploadingFile] = useState(false);
 
   // Landing page sub-views
   const [landingSubView, setLandingSubView] = useState(null);
@@ -86,6 +93,23 @@ export default function App() {
     }
   }, [currentUser, activeTab, activeTagFilter, loadMoments]);
 
+  // 文件上传辅助
+  const uploadFile = async (file) => {
+    setUploadingFile(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      setUploadingFile(false);
+      return data.url;
+    } catch (err) {
+      console.error('Upload failed:', err);
+      setUploadingFile(false);
+      return null;
+    }
+  };
+
   const loadLandingData = useCallback(async () => {
     try {
       const [about, safety, clubs, shops] = await Promise.all([
@@ -105,6 +129,40 @@ export default function App() {
       loadLandingData();
     }
   }, [appView, loadLandingData]);
+
+  const loadDiscoverGraph = useCallback(async () => {
+    if (!currentUser) return;
+    try {
+      const data = await API.get(`/api/users/${currentUser.id}/discover-graph`);
+      setGraphData(data);
+    } catch (err) {
+      console.error('Failed to load discover graph:', err);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (currentUser && appView === 'app' && activeTab === 'matches' && !activeChat) {
+      loadDiscoverGraph();
+    }
+  }, [currentUser, appView, activeTab, activeChat, loadDiscoverGraph]);
+
+  const handleGraphLike = async (profile) => {
+    if (!currentUser) return;
+    try {
+      await API.post('/api/matches', { userAId: currentUser.id, userBId: profile.id });
+      if (Math.random() > 0.3) handleMatch(profile);
+      setGraphData(prev => prev ? { ...prev, profiles: prev.profiles.filter(p => p.id !== profile.id) } : null);
+      setSelectedNode(null);
+    } catch (err) { console.error('Graph like failed:', err); }
+  };
+
+  const handleGraphPass = () => {
+    setGraphData(prev => {
+      if (!prev || !selectedNode) return prev;
+      return { ...prev, profiles: prev.profiles.filter(p => p.id !== selectedNode.id) };
+    });
+    setSelectedNode(null);
+  };
 
   const handlePass = () => {
     if (queue.length === 0 || leaving) return;
@@ -364,13 +422,14 @@ export default function App() {
       const moment = await API.post('/api/moments', {
         authorId: currentUser.id,
         title: newMomentText,
-        image: 'https://images.unsplash.com/photo-1517486808906-6ca8b3f04846?auto=format&fit=crop&w=600&q=80',
+        image: newMomentImage || 'https://images.unsplash.com/photo-1517486808906-6ca8b3f04846?auto=format&fit=crop&w=600&q=80',
         tags: formattedTag ? [formattedTag] : [],
       });
       setMoments([moment, ...moments]);
       setIsPublishing(false); 
       setNewMomentText(''); 
       setNewMomentTag('');
+      setNewMomentImage(null);
     } catch (err) {
       console.error('Publish failed:', err);
     }
@@ -478,100 +537,191 @@ export default function App() {
   );
 
   const renderDiscover = () => {
-    const profile = queue[0];
+    const profiles = graphData?.profiles || [];
+    const centerUser = graphData?.centerUser || displayUser;
+
+    // SVG 星型图布局参数
+    const W = 700, H = 500;
+    const cx = W / 2, cy = H / 2;
+    const minR = 80, maxR = 210;
+    const nodeSizeMin = 18, nodeSizeMax = 36;
+
+    // 计算节点位置
+    const nodes = profiles.map((p, i) => {
+      const score = p.matchScore || 0.1;
+      const r = maxR - (maxR - minR) * score;
+      const angle = (2 * Math.PI * i) / profiles.length - Math.PI / 2;
+      const size = nodeSizeMin + (nodeSizeMax - nodeSizeMin) * score;
+      return { ...p, x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle), size, r, angle };
+    });
+
+    // 连线粗细：1~6px，颜色从灰到黑
+    const lineProps = (score) => ({
+      strokeWidth: 1 + 5 * score,
+      stroke: `rgba(0,0,0,${0.15 + 0.6 * score})`,
+    });
+
     return (
-      <div className="flex-1 relative flex flex-col bg-[#f4f4f0] h-full">
-        <div className="md:hidden absolute top-0 w-full h-16 bg-[#f4f4f0]/90 backdrop-blur flex items-center justify-between px-6 z-20">
-          <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} className="text-black">
-            <MessageCircle size={24} />
-            {matches.length > 0 && <span className="absolute top-4 left-9 w-2 h-2 bg-rose-500 rounded-full"></span>}
-          </button>
-          <span className="font-serif font-black text-2xl tracking-tighter text-black">BIUH Match</span>
+      <div className="flex-1 relative flex flex-col bg-[#f4f4f0] h-full overflow-hidden">
+        {/* 移动端顶栏 */}
+        <div className="md:hidden h-14 bg-[#f4f4f0]/90 backdrop-blur flex items-center justify-between px-6 z-20 border-b border-gray-100 shrink-0">
+          <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} className="text-black"><MessageCircle size={24} /></button>
+          <span className="font-serif font-black text-xl tracking-tighter text-black">星型匹配</span>
           <button onClick={() => { setActiveTab('profile'); setActiveChat(null); }} className="text-black"><User size={24} /></button>
         </div>
 
-        <div id="discover-scroll-container" className="flex-1 overflow-y-auto w-full pt-16 md:pt-0 pb-32 smooth-scroll">
-          {queue.length === 0 ? (
-            <div className="w-full h-full flex flex-col items-center justify-center text-gray-400 min-h-[600px]">
-              <div className="w-24 h-24 rounded-full bg-gray-200 flex items-center justify-center mb-6 overflow-hidden border-4 border-white shadow-md">
-                <img src={displayUser.avatar} alt="Me" className="w-full h-full object-cover opacity-50 grayscale" />
+        <div className="flex-1 flex flex-col items-center justify-center p-4 md:p-8 relative">
+          {/* 标题 */}
+          <div className="text-center mb-3 shrink-0">
+            <h2 className="text-2xl md:text-3xl font-serif font-bold text-black">发现你的校园匹配</h2>
+            <p className="text-gray-500 text-sm mt-1">距离中心越近，匹配度越高 · 点击头像互动</p>
+          </div>
+
+          {profiles.length === 0 ? (
+            <div className="flex flex-col items-center justify-center text-gray-400 py-20">
+              <div className="w-20 h-20 rounded-full bg-gray-200 flex items-center justify-center mb-4">
+                <User size={32} className="text-gray-400" />
               </div>
-              <h2 className="text-2xl font-serif text-black mb-2">当前校区没有更多同学了</h2>
-              <p className="mb-6">扩大搜索范围或稍后再试</p>
-              <button onClick={handleReset} className="px-8 py-3 bg-black text-white rounded-full font-bold shadow-lg hover:bg-gray-800 transition">重新搜索</button>
+              <p className="text-lg font-serif text-black mb-2">暂无推荐用户</p>
+              <p className="mb-4 text-sm">完善你的资料以获得更精准的推荐</p>
+              <button onClick={loadDiscoverGraph} className="px-6 py-2.5 bg-black text-white rounded-full font-bold text-sm hover:bg-gray-800 transition">重新搜索</button>
             </div>
           ) : (
-            <div className={`max-w-md mx-auto p-4 space-y-6 transition-all duration-400 ease-in-out ${leaving ? 'opacity-0 translate-y-10 scale-95' : 'opacity-100 translate-y-0 scale-100'}`}>
-              <div className="relative bg-white rounded-2xl overflow-hidden shadow-sm group">
-                <img src={profile.photos?.[0] || profile.avatar} className="w-full aspect-[4/5] object-cover" alt="Profile 1" />
-                <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent pt-20 p-6 text-white">
-                  <div className="flex items-baseline gap-2"><h1 className="text-3xl font-serif font-bold">{profile.name}</h1></div>
-                  <p className="text-lg opacity-90 mt-1">{profile.age}岁 · {profile.gender === 'male' ? '男生' : '女生'} · {profile.major} · {profile.year}</p>
-                  <div className="flex items-center gap-2 text-sm mt-2 opacity-80"><div className="w-1.5 h-1.5 rounded-full bg-white"></div><span>{profile.location}</span></div>
-                </div>
-                <button onClick={() => handleLike(profile)} className="absolute bottom-6 right-6 w-12 h-12 bg-white rounded-full flex items-center justify-center text-black shadow-lg hover:scale-110 transition">
-                  <Heart size={22} className="fill-black" />
-                </button>
-              </div>
+            <div className="w-full max-w-[750px] relative">
+              <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" style={{ maxHeight: '55vh' }}>
+                {/* 背景同心圆 */}
+                {[0.3, 0.6, 0.9].map((frac, i) => (
+                  <circle key={i} cx={cx} cy={cy} r={minR + (maxR - minR) * frac} fill="none" stroke="#e5e5e5" strokeWidth="1" strokeDasharray="4 4" />
+                ))}
 
-              {profile.prompts?.[0] && (
-                <div className="bg-white p-8 rounded-2xl shadow-sm relative group">
-                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">{profile.prompts[0].q}</p>
-                  <h2 className="text-2xl font-serif text-black leading-snug">{profile.prompts[0].a}</h2>
-                  <button onClick={() => handleLike(profile)} className="absolute -bottom-5 right-6 w-12 h-12 bg-white border border-gray-100 rounded-full flex items-center justify-center text-black shadow-lg hover:scale-110 transition">
-                    <Heart size={22} className="fill-black" />
-                  </button>
-                </div>
-              )}
+                {/* 连线 */}
+                {nodes.map((n, i) => (
+                  <line key={`line-${i}`} x1={cx} y1={cy} x2={n.x} y2={n.y} {...lineProps(n.matchScore || 0.1)} style={{ transition: 'all 0.3s' }} />
+                ))}
 
-              {profile.photos?.[1] && (
-                <div className="relative bg-white rounded-2xl overflow-hidden shadow-sm group mt-10">
-                  <img src={profile.photos[1]} className="w-full aspect-square object-cover" alt="Profile 2" />
-                  <button onClick={() => handleLike(profile)} className="absolute bottom-6 right-6 w-12 h-12 bg-white rounded-full flex items-center justify-center text-black shadow-lg hover:scale-110 transition">
-                    <Heart size={22} className="fill-black" />
-                  </button>
-                </div>
-              )}
+                {/* 中心节点 (当前用户) */}
+                <g>
+                  <circle cx={cx} cy={cy} r={30} fill="white" stroke="black" strokeWidth="3" />
+                  <image href={centerUser.avatar} x={cx - 24} y={cy - 24} width={48} height={48} clipPath="circle(24px at 24px 24px)" preserveAspectRatio="xMidYMid slice" />
+                  <text x={cx} y={cy + 44} textAnchor="middle" className="text-[11px] font-bold fill-black">{centerUser.name}</text>
+                </g>
 
-              {profile.prompts?.[1] && (
-                <div className="bg-white p-8 rounded-2xl shadow-sm relative group mb-8">
-                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">{profile.prompts[1].q}</p>
-                  <h2 className="text-2xl font-serif text-black leading-snug">{profile.prompts[1].a}</h2>
-                  <button onClick={() => handleLike(profile)} className="absolute -bottom-5 right-6 w-12 h-12 bg-white border border-gray-100 rounded-full flex items-center justify-center text-black shadow-lg hover:scale-110 transition">
-                    <Heart size={22} className="fill-black" />
-                  </button>
-                </div>
-              )}
+                {/* 外围节点 */}
+                {nodes.map((n, i) => {
+                  const isHovered = hoveredNode?.id === n.id;
+                  const isSelected = selectedNode?.id === n.id;
+                  const s = isHovered || isSelected ? n.size * 1.2 : n.size;
+                  return (
+                    <g key={n.id}
+                      style={{ cursor: 'pointer', transition: 'transform 0.3s ease' }}
+                      onMouseEnter={(e) => { setHoveredNode(n); setTooltipPos({ x: n.x, y: n.y }); }}
+                      onMouseLeave={() => setHoveredNode(null)}
+                      onClick={() => setSelectedNode(n)}>
+                      {/* 光晕效果 */}
+                      {(isHovered || isSelected) && <circle cx={n.x} cy={n.y} r={s + 6} fill="rgba(0,0,0,0.06)" />}
+                      {/* 节点圆 */}
+                      <circle cx={n.x} cy={n.y} r={s} fill="white" stroke={isSelected ? '#e11d48' : '#ddd'} strokeWidth={isSelected ? 3 : 1.5} />
+                      <image href={n.photos?.[0] || n.avatar} x={n.x - s + 3} y={n.y - s + 3} width={(s - 3) * 2} height={(s - 3) * 2}
+                        clipPath={`circle(${s - 3}px at ${s - 3}px ${s - 3}px)`} preserveAspectRatio="xMidYMid slice" />
+                      {/* 匹配分数 */}
+                      <text x={n.x} y={n.y + s + 14} textAnchor="middle" className="text-[10px] font-bold" fill={isHovered ? '#e11d48' : '#666'}>
+                        {Math.round((n.matchScore || 0) * 100)}%
+                      </text>
+                      {/* 悬停提示 */}
+                      {isHovered && !isSelected && (
+                        <g>
+                          <rect x={n.x - 50} y={n.y - s - 34} width={100} height={24} rx={6} fill="black" fillOpacity={0.85} />
+                          <text x={n.x} y={n.y - s - 18} textAnchor="middle" className="text-[11px] font-bold" fill="white">
+                            {n.name} · {n.age}岁
+                          </text>
+                        </g>
+                      )}
+                    </g>
+                  );
+                })}
+              </svg>
             </div>
           )}
+
+          {/* 刷新按钮 */}
+          <button onClick={loadDiscoverGraph} className="mt-2 flex items-center gap-2 text-gray-500 hover:text-black text-sm font-bold transition shrink-0">
+            <RefreshCw size={16} />刷新推荐
+          </button>
         </div>
 
-        {queue.length > 0 && (
-          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-10 flex gap-4">
-            <button onClick={handlePass} className="w-16 h-16 bg-white border border-gray-200 rounded-full shadow-xl flex items-center justify-center text-gray-800 hover:scale-105 hover:bg-gray-50 transition" disabled={leaving}>
-              <X size={32} strokeWidth={2} />
-            </button>
+        {/* 选中用户的 Profile 浮层 */}
+        {selectedNode && (
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm z-30 flex items-center justify-center p-4"
+            onClick={(e) => { if (e.target === e.currentTarget) setSelectedNode(null); }}>
+            <div className="bg-white rounded-3xl shadow-2xl max-w-sm w-full overflow-hidden animate-in slide-in-from-bottom-4 duration-300" onClick={e => e.stopPropagation()}>
+              <div className="relative">
+                <img src={selectedNode.photos?.[0] || selectedNode.avatar} className="w-full aspect-[4/3] object-cover" alt={selectedNode.name} />
+                <button onClick={() => setSelectedNode(null)}
+                  className="absolute top-3 right-3 w-8 h-8 bg-white/80 backdrop-blur rounded-full flex items-center justify-center hover:bg-white transition"><X size={18} /></button>
+                <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent pt-16 p-5 text-white">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-2xl font-serif font-bold">{selectedNode.name}</h3>
+                      <p className="text-sm opacity-90 mt-0.5">{selectedNode.age}岁 · {selectedNode.gender === 'male' ? '男生' : '女生'} · {selectedNode.major}</p>
+                      <p className="text-xs opacity-70 mt-1">{selectedNode.year} · {selectedNode.location}</p>
+                    </div>
+                    <div className="bg-white text-black rounded-xl px-3 py-2 text-center shadow-lg">
+                      <div className="text-2xl font-black leading-none">{Math.round((selectedNode.matchScore || 0) * 100)}</div>
+                      <div className="text-[10px] font-bold text-gray-500">匹配</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {selectedNode.bio && (
+                <div className="px-5 pt-4 pb-2"><p className="text-sm text-gray-600 leading-relaxed">{selectedNode.bio}</p></div>
+              )}
+              {selectedNode.mbti && (
+                <div className="px-5 pb-2 flex flex-wrap gap-1.5">
+                  <span className="px-2.5 py-0.5 bg-gray-100 rounded-full text-xs font-bold text-gray-700">{selectedNode.mbti}</span>
+                  {selectedNode.hobbies && selectedNode.hobbies.split(/[,，、]/).filter(Boolean).map((h, i) => (
+                    <span key={i} className="px-2.5 py-0.5 bg-rose-50 text-rose-600 rounded-full text-xs font-medium">{h.trim()}</span>
+                  ))}
+                </div>
+              )}
+              {selectedNode.prompts?.[0] && (
+                <div className="p-5 border-t border-gray-100">
+                  <p className="text-xs text-gray-400 font-bold uppercase tracking-wider mb-1">{selectedNode.prompts[0].q}</p>
+                  <p className="text-gray-700 font-serif">{selectedNode.prompts[0].a}</p>
+                </div>
+              )}
+              <div className="flex gap-3 p-4">
+                <button onClick={handleGraphPass}
+                  className="flex-1 py-3 border-2 border-gray-200 rounded-xl font-bold text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition flex items-center justify-center gap-2">
+                  <X size={20} />跳过
+                </button>
+                <button onClick={() => handleGraphLike(selectedNode)}
+                  className="flex-1 py-3 bg-black text-white rounded-xl font-bold hover:bg-gray-800 transition flex items-center justify-center gap-2">
+                  <Heart size={20} className="fill-white" />Like
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
+        {/* 匹配动画 */}
         {showMatchAnimation && (
           <div className="absolute inset-0 bg-[#f4f4f0]/95 backdrop-blur-md z-50 flex flex-col items-center justify-center p-6 animate-in fade-in duration-300">
-            <h1 className="text-4xl md:text-5xl font-serif font-bold text-black mb-12 text-center tracking-tight">
+            <h1 className="text-3xl md:text-4xl font-serif font-bold text-black mb-10 text-center tracking-tight">
               You and {showMatchAnimation.name} invited each other to chat.
             </h1>
-            <div className="flex items-center gap-6 mb-16 relative">
-              <img src={displayUser.avatar} className="w-32 h-32 rounded-full border-[6px] border-white object-cover shadow-xl z-10 translate-x-4" alt="Me" />
+            <div className="flex items-center gap-6 mb-12 relative">
+              <img src={displayUser.avatar} className="w-28 h-28 rounded-full border-[6px] border-white object-cover shadow-xl z-10 translate-x-4" alt="Me" />
               <img src={showMatchAnimation.photos?.[0] || showMatchAnimation.avatar}
-                className="w-32 h-32 rounded-full border-[6px] border-white object-cover shadow-xl z-0 -translate-x-4 cursor-pointer hover:scale-105 hover:z-20 transition-all"
-                alt="Match" title="查看TA的主页"
-                onClick={() => handleViewProfile(showMatchAnimation.name, showMatchAnimation.photos?.[0] || showMatchAnimation.avatar, showMatchAnimation.id)}
+                className="w-28 h-28 rounded-full border-[6px] border-white object-cover shadow-xl z-0 -translate-x-4 cursor-pointer hover:scale-105 hover:z-20 transition-all"
+                alt="Match"
+                onClick={() => { handleViewProfile(showMatchAnimation.name, showMatchAnimation.photos?.[0] || showMatchAnimation.avatar, showMatchAnimation.id); setShowMatchAnimation(null); }}
               />
             </div>
-            <div className="w-full max-w-sm space-y-4">
+            <div className="w-full max-w-sm space-y-3">
               <button onClick={() => { setActiveChat(showMatchAnimation); setShowMatchAnimation(null); }}
-                className="w-full py-4 bg-black text-white rounded-full font-bold text-lg hover:bg-gray-800 transition shadow-lg">打个招呼</button>
+                className="w-full py-3.5 bg-black text-white rounded-full font-bold text-lg hover:bg-gray-800 transition shadow-lg">打个招呼</button>
               <button onClick={() => setShowMatchAnimation(null)}
-                className="w-full py-4 bg-transparent border-2 border-black text-black rounded-full font-bold text-lg hover:bg-black/5 transition">继续探索</button>
+                className="w-full py-3.5 bg-transparent border-2 border-black text-black rounded-full font-bold text-lg hover:bg-black/5 transition">继续探索</button>
             </div>
           </div>
         )}
@@ -739,8 +889,18 @@ export default function App() {
                   ))}
                 </div>
               </div>
-              <div className="border-2 border-dashed border-gray-200 rounded-xl h-24 flex flex-col items-center justify-center text-gray-400 cursor-pointer hover:bg-gray-50 transition">
-                <PlusSquare size={28} className="mb-1 opacity-50" /><span className="text-xs font-medium">点击上传照片</span>
+              <input type="file" id="moment-img-up" accept="image/*" className="hidden" onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (f) { const u = await uploadFile(f); if (u) setNewMomentImage(u); }
+              }} />
+              <div className="border-2 border-dashed border-gray-200 rounded-xl h-24 flex flex-col items-center justify-center text-gray-400 cursor-pointer hover:bg-gray-50 transition overflow-hidden relative"
+                onClick={() => document.getElementById('moment-img-up').click()}>
+                {newMomentImage ? (
+                  <><img src={newMomentImage} className="absolute inset-0 w-full h-full object-cover" alt="preview" />
+                  <div className="absolute inset-0 bg-black/30 flex items-center justify-center opacity-0 hover:opacity-100 transition"><span className="text-white text-xs font-bold">更换图片</span></div></>
+                ) : (
+                  <><PlusSquare size={28} className="mb-1 opacity-50" /><span className="text-xs font-medium">{uploadingFile ? '上传中...' : '点击上传照片'}</span></>
+                )}
               </div>
             </div>
           </div>
@@ -806,12 +966,25 @@ export default function App() {
       </div>
       <div className="p-6 md:p-10 max-w-2xl mx-auto w-full pt-8 md:pt-16">
         <div className="flex flex-col items-center mb-12">
-          <div className="w-40 h-40 rounded-full overflow-hidden mb-6 border-4 border-white shadow-lg relative group cursor-pointer">
+          <input type="file" id="profile-avatar-upload" accept="image/*" className="hidden" onChange={async (e) => {
+            const file = e.target.files?.[0];
+            if (file && currentUser) {
+              const url = await uploadFile(file);
+              if (url) {
+                const updated = { ...currentUser, avatar: url };
+                setCurrentUser(updated);
+                await API.put(`/api/users/${currentUser.id}`, { avatar: url });
+              }
+            }
+          }} />
+          <div className="w-40 h-40 rounded-full overflow-hidden mb-6 border-4 border-white shadow-lg relative group cursor-pointer"
+            onClick={() => document.getElementById('profile-avatar-upload').click()}>
             <img src={displayUser.avatar} alt="Me" className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
-            <div className="absolute inset-0 bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
-              <span className="text-white font-bold text-sm">更换头像</span>
+            <div className="absolute inset-0 bg-black/30 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
+              <Camera size={28} className="text-white" />
             </div>
           </div>
+          {uploadingFile && <p className="text-xs text-gray-400 mt-1">上传中...</p>}
           <h2 className="text-3xl font-serif font-bold text-black">{displayUser.name}</h2>
           <p className="text-gray-500 mt-2 tracking-widest text-sm uppercase">Member since 2024</p>
         </div>
@@ -879,6 +1052,79 @@ export default function App() {
                     <input type="text" defaultValue={displayUser.location} onChange={(e) => setCurrentUser(prev => ({...prev, location: e.target.value}))}
                       className="w-full border-b border-gray-200 py-2 focus:border-black outline-none transition font-medium" />
                   </div>
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">自我介绍</label>
+                    <textarea rows="3" defaultValue={displayUser.bio} placeholder="写几句话介绍自己吧..."
+                      onChange={(e) => setCurrentUser(prev => ({...prev, bio: e.target.value}))}
+                      className="w-full border-b border-gray-200 py-2 focus:border-black outline-none transition font-medium resize-none" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                      <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">MBTI 人格</label>
+                      <select defaultValue={displayUser.mbti || ''} onChange={(e) => setCurrentUser(prev => ({...prev, mbti: e.target.value}))}
+                        className="w-full border-b border-gray-200 py-2 focus:border-black outline-none transition font-medium bg-white appearance-none cursor-pointer">
+                        <option value="">未选择</option>
+                        <option value="INTJ">INTJ</option><option value="INTP">INTP</option>
+                        <option value="ENTJ">ENTJ</option><option value="ENTP">ENTP</option>
+                        <option value="INFJ">INFJ</option><option value="INFP">INFP</option>
+                        <option value="ENFJ">ENFJ</option><option value="ENFP">ENFP</option>
+                        <option value="ISTJ">ISTJ</option><option value="ISTP">ISTP</option>
+                        <option value="ESTJ">ESTJ</option><option value="ESTP">ESTP</option>
+                        <option value="ISFJ">ISFJ</option><option value="ISFP">ISFP</option>
+                        <option value="ESFJ">ESFJ</option><option value="ESFP">ESFP</option>
+                      </select>
+                    </div>
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                      <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">最爱食物</label>
+                      <input type="text" defaultValue={displayUser.favorite_food} placeholder="火锅、奶茶..."
+                        onChange={(e) => setCurrentUser(prev => ({...prev, favorite_food: e.target.value}))}
+                        className="w-full border-b border-gray-200 py-2 focus:border-black outline-none transition font-medium" />
+                    </div>
+                  </div>
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">兴趣爱好</label>
+                    <input type="text" defaultValue={displayUser.hobbies} placeholder="摄影、篮球、阅读..."
+                      onChange={(e) => setCurrentUser(prev => ({...prev, hobbies: e.target.value}))}
+                      className="w-full border-b border-gray-200 py-2 focus:border-black outline-none transition font-medium" />
+                  </div>
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">感兴趣的内容</label>
+                    <input type="text" defaultValue={displayUser.interests} placeholder="科技、艺术、旅行..."
+                      onChange={(e) => setCurrentUser(prev => ({...prev, interests: e.target.value}))}
+                      className="w-full border-b border-gray-200 py-2 focus:border-black outline-none transition font-medium" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                      <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">喜欢的音乐</label>
+                      <input type="text" defaultValue={displayUser.music_genre} placeholder="流行、摇滚..."
+                        onChange={(e) => setCurrentUser(prev => ({...prev, music_genre: e.target.value}))}
+                        className="w-full border-b border-gray-200 py-2 focus:border-black outline-none transition font-medium" />
+                    </div>
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                      <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">喜欢的电影</label>
+                      <input type="text" defaultValue={displayUser.movie_genre} placeholder="科幻、喜剧..."
+                        onChange={(e) => setCurrentUser(prev => ({...prev, movie_genre: e.target.value}))}
+                        className="w-full border-b border-gray-200 py-2 focus:border-black outline-none transition font-medium" />
+                    </div>
+                  </div>
+                  <button onClick={async () => {
+                    if (currentUser) {
+                      try {
+                        const result = await API.put(`/api/users/${currentUser.id}`, {
+                          name: currentUser.name, age: currentUser.age, gender: currentUser.gender,
+                          major: currentUser.major, year: currentUser.year, location: currentUser.location,
+                          bio: currentUser.bio, favorite_food: currentUser.favorite_food,
+                          hobbies: currentUser.hobbies, interests: currentUser.interests,
+                          mbti: currentUser.mbti, music_genre: currentUser.music_genre,
+                          movie_genre: currentUser.movie_genre,
+                        });
+                        if (result.user) setCurrentUser(result.user);
+                        setProfileSubView(null);
+                      } catch (err) { console.error('Save failed:', err); }
+                    }
+                  }} className="w-full py-4 bg-black text-white rounded-xl font-bold text-lg shadow-xl hover:bg-gray-800 transition-all">
+                    保存资料
+                  </button>
                 </div>
               )}
               {profileSubView === 'settings' && (
@@ -915,16 +1161,20 @@ export default function App() {
         <form onSubmit={handleCompleteOnboarding} className="space-y-8">
           <div className="flex flex-col items-center">
             <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-4">你的校园形象</label>
-            <div className="relative group cursor-pointer" onClick={() => {
-              const nextIdx = (avatarIndex + 1) % MOCK_AVATARS.length;
-              setAvatarIndex(nextIdx);
-              setCurrentUser(prev => ({ ...prev, avatar: MOCK_AVATARS[nextIdx] }));
-            }}>
+            <input type="file" id="avatar-upload" accept="image/*" className="hidden" onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (file) {
+                const url = await uploadFile(file);
+                if (url) setCurrentUser(prev => ({ ...prev, avatar: url }));
+              }
+            }} />
+            <div className="relative group cursor-pointer" onClick={() => document.getElementById('avatar-upload').click()}>
               <img src={displayUser.avatar} className="w-32 h-32 rounded-full object-cover border-4 border-[#f4f4f0] shadow-md group-hover:opacity-80 transition" alt="Avatar" />
               <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                <span className="bg-black/60 text-white text-xs font-bold px-3 py-1 rounded-full">点击切换</span>
+                <span className="bg-black/60 text-white text-xs font-bold px-3 py-1 rounded-full">{uploadingFile ? '上传中...' : '点击上传头像'}</span>
               </div>
             </div>
+            <p className="text-xs text-gray-400 mt-2">点击从本地选择图片，或使用默认头像</p>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6">
             <div>

@@ -27,6 +27,20 @@ db.exec(`
     location TEXT DEFAULT '',
     avatar TEXT DEFAULT '',
     prompt_answer TEXT DEFAULT '',
+    bio TEXT DEFAULT '',
+    favorite_food TEXT DEFAULT '',
+    hobbies TEXT DEFAULT '',
+    interests TEXT DEFAULT '',
+    mbti TEXT DEFAULT '',
+    music_genre TEXT DEFAULT '',
+    movie_genre TEXT DEFAULT '',
+    pet TEXT DEFAULT '',
+    relationship_goal TEXT DEFAULT '',
+    zodiac TEXT DEFAULT '',
+    smoking TEXT DEFAULT '',
+    drinking TEXT DEFAULT '',
+    exercise TEXT DEFAULT '',
+    social_media TEXT DEFAULT '',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -148,6 +162,31 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
+
+// ===== 数据库迁移：为已有表添加新字段 =====
+const migrations = [
+  { table: 'users', column: 'bio', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'favorite_food', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'hobbies', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'interests', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'mbti', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'music_genre', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'movie_genre', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'pet', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'relationship_goal', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'zodiac', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'smoking', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'drinking', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'exercise', type: 'TEXT DEFAULT ""' },
+  { table: 'users', column: 'social_media', type: 'TEXT DEFAULT ""' },
+];
+for (const m of migrations) {
+  try {
+    db.prepare(`ALTER TABLE ${m.table} ADD COLUMN ${m.column} ${m.type}`).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
+}
 
 // ===== 种子数据 =====
 

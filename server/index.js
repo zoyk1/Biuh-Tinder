@@ -2,13 +2,43 @@ import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
+import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
 import db from './db.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname) || '.jpg';
+    cb(null, `${uuidv4()}${ext}`);
+  }
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = /\.(jpg|jpeg|png|gif|webp|bmp|svg|pdf|doc|docx|txt)$/i;
+    if (allowed.test(path.extname(file.originalname))) cb(null, true);
+    else cb(new Error('不支持的文件格式'));
+  }
+});
 
 const app = express();
 const PORT = 3001;
 
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static(uploadsDir));
 
 // ============================================================
 // 辅助函数
@@ -112,13 +142,25 @@ app.get('/api/users/:id', (req, res) => {
 
 // 更新用户信息
 app.put('/api/users/:id', (req, res) => {
-  const { name, age, gender, major, year, location, avatar, prompt_answer } = req.body;
+  const { name, age, gender, major, year, location, avatar, prompt_answer,
+    bio, favorite_food, hobbies, interests, mbti, music_genre, movie_genre,
+    pet, relationship_goal, zodiac, smoking, drinking, exercise, social_media } = req.body;
   db.prepare(`
     UPDATE users SET name=COALESCE(?,name), age=COALESCE(?,age), gender=COALESCE(?,gender),
     major=COALESCE(?,major), year=COALESCE(?,year), location=COALESCE(?,location),
-    avatar=COALESCE(?,avatar), prompt_answer=COALESCE(?,prompt_answer)
+    avatar=COALESCE(?,avatar), prompt_answer=COALESCE(?,prompt_answer),
+    bio=COALESCE(?,bio), favorite_food=COALESCE(?,favorite_food),
+    hobbies=COALESCE(?,hobbies), interests=COALESCE(?,interests),
+    mbti=COALESCE(?,mbti), music_genre=COALESCE(?,music_genre),
+    movie_genre=COALESCE(?,movie_genre),
+    pet=COALESCE(?,pet), relationship_goal=COALESCE(?,relationship_goal),
+    zodiac=COALESCE(?,zodiac), smoking=COALESCE(?,smoking),
+    drinking=COALESCE(?,drinking), exercise=COALESCE(?,exercise),
+    social_media=COALESCE(?,social_media)
     WHERE id=?
-  `).run(name, age !== undefined ? age : null, gender, major, year, location, avatar, prompt_answer, req.params.id);
+  `).run(name, age !== undefined ? age : null, gender, major, year, location, avatar, prompt_answer,
+    bio, favorite_food, hobbies, interests, mbti, music_genre, movie_genre,
+    pet, relationship_goal, zodiac, smoking, drinking, exercise, social_media, req.params.id);
   const user = getUserProfile(req.params.id);
   res.json({ message: '更新成功', user });
 });
@@ -340,6 +382,112 @@ app.get('/api/shops/:id', (req, res) => {
   const shop = db.prepare('SELECT * FROM shops WHERE id = ?').get(req.params.id);
   if (!shop) return res.status(404).json({ error: '商店不存在' });
   res.json(shop);
+});
+
+// ============================================================
+// 文件上传 API
+// ============================================================
+
+// 通用文件上传
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: '请选择文件' });
+  const url = `/uploads/${req.file.filename}`;
+  res.json({ url, filename: req.file.filename, size: req.file.size });
+});
+
+// 添加用户照片
+app.post('/api/users/:id/photos', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: '请选择图片' });
+  const url = `/uploads/${req.file.filename}`;
+  const maxOrder = db.prepare('SELECT MAX(sort_order) as max FROM user_photos WHERE user_id = ?').get(req.params.id);
+  const sortOrder = (maxOrder?.max || 0) + 1;
+  db.prepare('INSERT INTO user_photos (user_id, url, sort_order) VALUES (?, ?, ?)').run(req.params.id, url, sortOrder);
+  const user = getUserProfile(req.params.id);
+  res.json({ message: '照片上传成功', photos: user.photos });
+});
+
+// 删除用户照片
+app.delete('/api/users/:id/photos', (req, res) => {
+  const { photoIndex } = req.body;
+  const photos = db.prepare('SELECT url, sort_order FROM user_photos WHERE user_id = ? ORDER BY sort_order').all(req.params.id);
+  if (photoIndex < 0 || photoIndex >= photos.length) return res.status(400).json({ error: '索引无效' });
+  db.prepare('DELETE FROM user_photos WHERE user_id = ? AND sort_order = ?').run(req.params.id, photos[photoIndex].sort_order);
+  res.json({ message: '照片已删除' });
+});
+
+// ============================================================
+// 星型图匹配 API
+// ============================================================
+
+function calcMatchScore(me, other) {
+  let score = 0;
+
+  // 专业匹配 (0.30)
+  const myMajor = (me.major || '').toLowerCase();
+  const otherMajor = (other.major || '').toLowerCase();
+  if (myMajor && otherMajor) {
+    if (myMajor === otherMajor) score += 0.30;
+    else if (myMajor.includes(otherMajor) || otherMajor.includes(myMajor)) score += 0.18;
+    else score += 0.03;
+  }
+
+  // 年级匹配 (0.25)
+  const yearOrder = { '大一': 1, '大二': 2, '大三': 3, '大四': 4, '研究生': 5, '博士生': 6 };
+  const myYear = yearOrder[me.year] || 0;
+  const otherYear = yearOrder[other.year] || 0;
+  if (myYear && otherYear) {
+    const diff = Math.abs(myYear - otherYear);
+    if (diff === 0) score += 0.25;
+    else if (diff === 1) score += 0.175;
+    else if (diff === 2) score += 0.075;
+    else score += 0.025;
+  }
+
+  // 地点匹配 (0.20) - Jaccard
+  const myLocs = new Set((me.location || '').split(/[,，、\s]+/).filter(Boolean));
+  const otherLocs = new Set((other.location || '').split(/[,，、\s]+/).filter(Boolean));
+  if (myLocs.size > 0 && otherLocs.size > 0) {
+    const intersection = [...myLocs].filter(x => otherLocs.has(x)).length;
+    const union = new Set([...myLocs, ...otherLocs]).size;
+    score += 0.20 * (intersection / union);
+  }
+
+  // 兴趣匹配 (0.15) - 关键词交集
+  const myWords = new Set((me.prompt_answer || '').toLowerCase().split(/\s+/).filter(w => w.length > 1));
+  const otherWords = new Set((other.prompt_answer || '').toLowerCase().split(/\s+/).filter(w => w.length > 1));
+  if (myWords.size > 0 && otherWords.size > 0) {
+    const overlap = [...myWords].filter(w => otherWords.has(w)).length;
+    score += 0.15 * Math.min(overlap / Math.min(myWords.size, otherWords.size), 1);
+  }
+
+  // 基础分 (0.10)
+  score += 0.10;
+
+  return Math.round(Math.min(score, 1) * 100) / 100;
+}
+
+// 获取星型图数据
+app.get('/api/users/:id/discover-graph', (req, res) => {
+  const currentUser = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!currentUser) return res.status(404).json({ error: '用户不存在' });
+
+  const matchedIds = db.prepare('SELECT user_b_id FROM matches WHERE user_a_id = ?').all(req.params.id).map(m => m.user_b_id);
+  const matchedIds2 = db.prepare('SELECT user_a_id FROM matches WHERE user_b_id = ?').all(req.params.id).map(m => m.user_a_id);
+  const excludeIds = [req.params.id, ...matchedIds, ...matchedIds2];
+
+  const placeholders = excludeIds.map(() => '?').join(',');
+  const users = db.prepare(`SELECT * FROM users WHERE id NOT IN (${placeholders})`).all(...excludeIds);
+
+  const profiles = users.map(u => {
+    const profile = getUserProfile(u.id);
+    const matchScore = calcMatchScore(currentUser, u);
+    return { ...profile, matchScore };
+  }).sort((a, b) => b.matchScore - a.matchScore);
+
+  res.json({
+    centerUser: getUserProfile(req.params.id),
+    profiles
+  });
 });
 
 // ============================================================
