@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import multer from 'multer';
 import path from 'path';
@@ -35,10 +36,33 @@ const upload = multer({
 
 const app = express();
 const PORT = 3001;
+const JWT_SECRET = process.env.JWT_SECRET || 'biuh-match-secret-key-2024';
 
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(uploadsDir));
+
+// ============================================================
+// JWT 认证中间件
+// ============================================================
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: '未登录或登录已过期' });
+  }
+  try {
+    const token = authHeader.slice(7);
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.userId = decoded.userId;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: '登录已过期，请重新登录' });
+  }
+}
+
+function signToken(userId) {
+  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
+}
 
 // ============================================================
 // 辅助函数
@@ -108,7 +132,8 @@ app.post('/api/auth/register', (req, res) => {
   const avatar = 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80';
   db.prepare('INSERT INTO users (id, name, email, password_hash, avatar) VALUES (?, ?, ?, ?, ?)').run(id, name, email, password_hash, avatar);
   const user = getUserProfile(id);
-  res.status(201).json({ message: '注册成功', user });
+  const token = signToken(id);
+  res.status(201).json({ message: '注册成功', token, user });
 });
 
 // 登录
@@ -126,12 +151,20 @@ app.post('/api/auth/login', (req, res) => {
     return res.status(401).json({ error: '邮箱或密码错误' });
   }
   const user = getUserProfile(row.id);
-  res.json({ message: '登录成功', user });
+  const token = signToken(row.id);
+  res.json({ message: '登录成功', token, user });
 });
 
 // ============================================================
 // 用户 API
 // ============================================================
+
+// 验证 token 并返回用户信息
+app.get('/api/auth/me', authMiddleware, (req, res) => {
+  const user = getUserProfile(req.userId);
+  if (!user) return res.status(404).json({ error: '用户不存在' });
+  res.json({ user });
+});
 
 // 获取当前用户信息
 app.get('/api/users/:id', (req, res) => {

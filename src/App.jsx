@@ -1,11 +1,35 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Heart, X, MessageCircle, User, Zap, Star, Send, ChevronLeft, RefreshCw, Flame, Settings, Shield, LogOut, Mail, Lock, ChevronRight, PlusSquare, Trash2, Hash, Camera } from 'lucide-react';
+// --- Token 管理 ---
+const TOKEN_KEY = 'biuh_token';
+const USER_KEY = 'biuh_user';
+
+const getToken = () => localStorage.getItem(TOKEN_KEY);
+const setToken = (token) => localStorage.setItem(TOKEN_KEY, token);
+const removeToken = () => { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY); };
+const saveUserToStorage = (user) => localStorage.setItem(USER_KEY, JSON.stringify(user));
+const getStoredUser = () => { try { return JSON.parse(localStorage.getItem(USER_KEY)); } catch { return null; } };
+
 // --- API 辅助函数 ---
 const API = {
-  get: (url) => fetch(url).then(r => r.json()),
-  post: (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()),
-  put: (url, body) => fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()),
-  del: (url, body) => fetch(url, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()),
+  get: (url) => fetch(url, {
+    headers: { ...(getToken() ? { 'Authorization': `Bearer ${getToken()}` } : {}) }
+  }).then(r => r.json()),
+  post: (url, body) => fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(getToken() ? { 'Authorization': `Bearer ${getToken()}` } : {}) },
+    body: JSON.stringify(body)
+  }).then(r => r.json()),
+  put: (url, body) => fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...(getToken() ? { 'Authorization': `Bearer ${getToken()}` } : {}) },
+    body: JSON.stringify(body)
+  }).then(r => r.json()),
+  del: (url, body) => fetch(url, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', ...(getToken() ? { 'Authorization': `Bearer ${getToken()}` } : {}) },
+    body: JSON.stringify(body)
+  }).then(r => r.json()),
 };
 
 const MOCK_AVATARS = [
@@ -21,7 +45,7 @@ export default function App() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
 
-  const [currentUser, setCurrentUser] = useState(null);
+  const [currentUser, setCurrentUser] = useState(() => getStoredUser());
   const [regName, setRegName] = useState('');
   const [avatarIndex, setAvatarIndex] = useState(0);
 
@@ -58,6 +82,364 @@ export default function App() {
   // Landing page sub-views
   const [landingSubView, setLandingSubView] = useState(null);
   const [landingData, setLandingData] = useState({ clubs: [], shops: [], about: null, safety: null });
+
+  // 星图 Canvas 相关 refs
+  const canvasRef = useRef(null);
+  const nodePositionsRef = useRef([]);
+  const hoveredNodeRef = useRef(null);
+  const selectedNodeRef = useRef(null);
+  hoveredNodeRef.current = hoveredNode;
+  selectedNodeRef.current = selectedNode;
+
+  // ====== 自动恢复登录会话 ======
+  useEffect(() => {
+    const token = getToken();
+    const storedUser = getStoredUser();
+    if (token && storedUser) {
+      // 有缓存的 token 和用户信息，先直接恢复界面
+      setCurrentUser(storedUser);
+      // 然后用 token 验证并获取最新用户数据
+      API.get('/api/auth/me').then(data => {
+        if (data.user) {
+          setCurrentUser(data.user);
+          saveUserToStorage(data.user);
+          loadAppData(data.user);
+          setAppView('app');
+        } else {
+          // token 无效，清除缓存
+          removeToken();
+          setCurrentUser(null);
+          setAppView('landing');
+        }
+      }).catch(() => {
+        // 网络错误时仍然使用缓存数据
+        loadAppData(storedUser);
+        setAppView('app');
+      });
+    }
+  }, []);
+
+  // ====== Canvas 星图渲染 ======
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !graphData?.profiles?.length) return;
+    const ctx = canvas.getContext('2d');
+    const container = canvas.parentElement;
+    if (!container) return;
+    const dpr = window.devicePixelRatio || 1;
+    let W = container.clientWidth;
+    let H = container.clientHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const cx = W / 2, cy = H / 2;
+    const profiles = graphData.profiles;
+    const centerUser = graphData.centerUser || displayUser;
+    let animId, time = 0;
+    const nodeSizeMin = 22, nodeSizeMax = 38;
+
+    // --- Seeded random for stable layout ---
+    const seedRand = (seed) => {
+      let s = seed;
+      return () => { s = (s * 16807 + 0) % 2147483647; return (s - 1) / 2147483646; };
+    };
+
+    // --- Pre-load avatar images ---
+    const imageCache = {};
+    const loadImage = (url) => new Promise((resolve) => {
+      if (!url) { resolve(null); return; }
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => { imageCache[url] = img; resolve(img); };
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
+
+    // Load all avatars
+    const allUrls = [
+      centerUser.avatar,
+      ...profiles.map(p => p.photos?.[0] || p.avatar)
+    ].filter(Boolean);
+    const uniqueUrls = [...new Set(allUrls)];
+    Promise.all(uniqueUrls.map(loadImage)).then(() => {
+      // Images loaded, start render
+      startRender();
+    });
+    // Also start immediately for non-image rendering
+    startRender();
+
+    function startRender() {
+
+    // --- Organic layout: Poisson-like scatter ---
+    // Use golden angle + jitter for organic but stable placement
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5)); // ~137.5°
+    const maxR = Math.min(W, H) * 0.44;
+    const minR = 55;
+    const padding = 20;
+
+    const positions = profiles.map((p, i) => {
+      const score = p.matchScore || 0.1;
+      const rand = seedRand(i * 7919 + 31);
+      // Golden angle spacing + jitter for organic feel
+      const baseAngle = i * goldenAngle;
+      const angleJitter = (rand() - 0.5) * 0.6; // ±0.3 radians jitter
+      const angle = baseAngle + angleJitter - Math.PI / 2;
+      // Radius: high score = closer, but with organic scatter
+      const baseR = maxR - (maxR - minR) * Math.pow(score, 0.7);
+      const rJitter = (rand() - 0.5) * 40; // ±20px jitter
+      const r = Math.max(minR, Math.min(maxR, baseR + rJitter));
+      const size = nodeSizeMin + (nodeSizeMax - nodeSizeMin) * Math.pow(score, 0.5);
+      const px = cx + r * Math.cos(angle);
+      const py = cy + r * Math.sin(angle);
+      // Clamp to canvas
+      const cpx = Math.max(padding + size, Math.min(W - padding - size, px));
+      const cpy = Math.max(padding + size, Math.min(H - padding - size, py));
+      return { ...p, px: cpx, py: cpy, size, r, angle, score };
+    });
+    nodePositionsRef.current = positions;
+
+    // --- Simple collision resolution ---
+    for (let iter = 0; iter < 5; iter++) {
+      for (let i = 0; i < positions.length; i++) {
+        for (let j = i + 1; j < positions.length; j++) {
+          const a = positions[i], b = positions[j];
+          const dx = b.px - a.px, dy = b.py - a.py;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const minDist = a.size + b.size + 12;
+          if (dist < minDist && dist > 0) {
+            const push = (minDist - dist) / 2;
+            const nx = dx / dist, ny = dy / dist;
+            a.px -= nx * push * 0.5; a.py -= ny * push * 0.5;
+            b.px += nx * push * 0.5; b.py += ny * push * 0.5;
+            // Re-clamp
+            a.px = Math.max(padding + a.size, Math.min(W - padding - a.size, a.px));
+            a.py = Math.max(padding + a.size, Math.min(H - padding - a.size, a.py));
+            b.px = Math.max(padding + b.size, Math.min(W - padding - b.size, b.px));
+            b.py = Math.max(padding + b.size, Math.min(H - padding - b.size, b.py));
+          }
+        }
+        // Push away from center if too close
+        const n = positions[i];
+        const dcx = n.px - cx, dcy = n.py - cy;
+        const dCenter = Math.sqrt(dcx * dcx + dcy * dcy);
+        if (dCenter < minR * 0.8) {
+          const push = (minR * 0.8 - dCenter);
+          if (dCenter > 0) {
+            n.px += (dcx / dCenter) * push;
+            n.py += (dcy / dCenter) * push;
+          }
+        }
+      }
+    }
+
+    const wobblyCircle = (x, y, r, w) => {
+      ctx.beginPath();
+      const n = 48;
+      for (let i = 0; i <= n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const noise = Math.sin(a * 5 + x * 0.02) * Math.cos(a * 3.5 + y * 0.02) * w;
+        const rr = Math.max(2, r + noise);
+        const px = x + rr * Math.cos(a), py = y + rr * Math.sin(a);
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+    };
+
+    const wobblyLine = (x1, y1, x2, y2, w) => {
+      const segs = 24, dx = x2 - x1, dy = y2 - y1;
+      const len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      const nx = -dy / len, ny = dx / len;
+      ctx.beginPath();
+      for (let i = 0; i <= segs; i++) {
+        const t = i / segs;
+        const off = Math.sin(t * Math.PI * 3.7 + x1 * 0.01 + y1 * 0.01) * w;
+        const px = x1 + dx * t + nx * off, py = y1 + dy * t + ny * off;
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    };
+
+    const drawAvatar = (img, x, y, r) => {
+      if (!img) return false;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x, y, r - 2, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.drawImage(img, x - r + 1, y - r + 1, (r - 1) * 2, (r - 1) * 2);
+      ctx.restore();
+      return true;
+    };
+
+    const render = () => {
+      time += 0.012;
+      ctx.clearRect(0, 0, W, H);
+
+      // Background gradient
+      const g = ctx.createRadialGradient(cx, cy * 0.8, 0, cx, cy, W * 0.7);
+      g.addColorStop(0, '#faf8f5'); g.addColorStop(1, '#f0ece4');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+      // Grid dots
+      ctx.fillStyle = 'rgba(0,0,0,0.035)';
+      for (let x = 0; x < W; x += 28) for (let y = 0; y < H; y += 28) ctx.fillRect(x, y, 1, 1);
+
+      // Soft organic background rings (hand-drawn style)
+      [0.3, 0.55, 0.8].forEach((f, i) => {
+        const ringR = minR + (maxR - minR) * f;
+        ctx.beginPath();
+        const n = 60;
+        for (let j = 0; j <= n; j++) {
+          const a = (j / n) * Math.PI * 2;
+          const noise = Math.sin(a * 3 + i * 2.1) * Math.cos(a * 2.3 + i) * (8 + i * 3);
+          const rr = Math.max(10, ringR + noise);
+          const px = cx + rr * Math.cos(a), py = cy + rr * Math.sin(a);
+          j === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = `rgba(0,0,0,${0.05 - i * 0.01})`; ctx.lineWidth = 1;
+        ctx.setLineDash([3, 7]); ctx.stroke(); ctx.setLineDash([]);
+      });
+
+      const hov = hoveredNodeRef.current;
+      const sel = selectedNodeRef.current;
+
+      // Edges from center to nodes
+      positions.forEach(n => {
+        const isH = hov?.id === n.id || sel?.id === n.id;
+        const alpha = isH ? 0.45 : 0.06 + n.score * 0.12;
+        ctx.strokeStyle = `rgba(0,0,0,${alpha.toFixed(3)})`;
+        ctx.lineWidth = isH ? 2 : 0.8 + n.score * 1.5;
+        wobblyLine(cx, cy, n.px, n.py, isH ? 3 : 1.5);
+        if (isH) {
+          const mx = (cx + n.px) / 2, my = (cy + n.py) / 2;
+          // Match score bubble on edge
+          wobblyCircle(mx, my - 4, 16, 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 1; ctx.stroke();
+          ctx.fillStyle = '#e11d48'; ctx.font = 'bold 11px sans-serif';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(Math.round(n.score * 100) + '%', mx, my - 4);
+        }
+      });
+
+      // Draw inter-node connections (between similar profiles)
+      positions.forEach((a, i) => {
+        positions.forEach((b, j) => {
+          if (j <= i) return;
+          const scoreSum = a.score + b.score;
+          if (scoreSum > 1.2) {
+            const dx = a.px - b.px, dy = a.py - b.py;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < maxR * 0.7) {
+              ctx.strokeStyle = `rgba(0,0,0,${0.03 + scoreSum * 0.02})`;
+              ctx.lineWidth = 0.5;
+              ctx.beginPath();
+              ctx.moveTo(a.px, a.py);
+              ctx.lineTo(b.px, b.py);
+              ctx.stroke();
+            }
+          }
+        });
+      });
+
+      // --- Center node with avatar ---
+      const centerSize = 32;
+      // Outer glow ring
+      wobblyCircle(cx, cy, centerSize + 6, 5);
+      ctx.strokeStyle = 'rgba(0,0,0,0.06)'; ctx.lineWidth = 1; ctx.stroke();
+      // White background
+      wobblyCircle(cx, cy, centerSize, 3);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 2.5; ctx.stroke();
+      // Draw center avatar
+      const centerImg = imageCache[centerUser.avatar];
+      if (centerImg) {
+        drawAvatar(centerImg, cx, cy, centerSize);
+        // Re-draw border on top of image
+        wobblyCircle(cx, cy, centerSize, 3);
+        ctx.strokeStyle = '#000'; ctx.lineWidth = 2.5; ctx.stroke();
+      } else {
+        ctx.fillStyle = '#000'; ctx.font = 'bold 14px serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const cName = centerUser.name || 'Me';
+        ctx.fillText(cName.length > 3 ? cName.slice(0, 2) : cName, cx, cy);
+      }
+      // Center name
+      ctx.fillStyle = '#000'; ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(centerUser.name || 'Me', cx, cy + centerSize + 6);
+
+      // --- Outer nodes with avatars ---
+      positions.forEach(n => {
+        const isH = hov?.id === n.id;
+        const isS = sel?.id === n.id;
+        const s = isH || isS ? n.size * 1.2 : n.size;
+        const floatY = Math.sin(time * 1.2 + n.angle * 3) * 2.5;
+        const floatX = Math.cos(time * 0.8 + n.angle * 2) * 1.5;
+        const px = n.px + floatX, py = n.py + floatY;
+
+        // Hover / select ring
+        if (isH || isS) {
+          ctx.beginPath();
+          ctx.arc(px, py, s + 7, 0, Math.PI * 2);
+          ctx.strokeStyle = isS ? 'rgba(225,29,72,0.3)' : 'rgba(0,0,0,0.12)';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+        }
+
+        // White background circle
+        ctx.beginPath();
+        ctx.arc(px, py, s, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff'; ctx.fill();
+        ctx.strokeStyle = isS ? '#e11d48' : (isH ? '#000' : 'rgba(0,0,0,0.15)');
+        ctx.lineWidth = isS ? 2.5 : (isH ? 2 : 1.5); ctx.stroke();
+
+        // Draw avatar image
+        const imgUrl = n.photos?.[0] || n.avatar;
+        const img = imageCache[imgUrl];
+        if (img) {
+          drawAvatar(img, px, py, s);
+          // Re-draw border on top
+          ctx.beginPath();
+          ctx.arc(px, py, s, 0, Math.PI * 2);
+          ctx.strokeStyle = isS ? '#e11d48' : (isH ? '#000' : 'rgba(0,0,0,0.15)');
+          ctx.lineWidth = isS ? 2.5 : (isH ? 2 : 1.5); ctx.stroke();
+        } else {
+          // Fallback: initial letter
+          ctx.fillStyle = isS ? '#e11d48' : '#000';
+          ctx.font = `bold ${Math.round(s * 0.65)}px serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(n.name?.charAt(0) || '?', px, py);
+        }
+
+        // Name below node
+        ctx.fillStyle = isH ? '#000' : 'rgba(0,0,0,0.5)';
+        ctx.font = `${isH ? 'bold' : 'normal'} ${isH ? 12 : 10}px sans-serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+        ctx.fillText(n.name, px, py + s + 5);
+
+        // Hover tooltip (name + age)
+        if (isH && !isS) {
+          const text = `${n.name} · ${n.age}岁`;
+          ctx.font = 'bold 11px sans-serif';
+          const tw = ctx.measureText(text).width + 16;
+          ctx.fillStyle = 'rgba(0,0,0,0.82)';
+          ctx.beginPath();
+          const bx = px - tw / 2, by = py - s - 28, bh = 22;
+          ctx.roundRect(bx, by, tw, bh, 6); ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(text, px, by + bh / 2);
+        }
+      });
+
+      animId = requestAnimationFrame(render);
+    };
+    render();
+    } // end startRender
+
+    return () => cancelAnimationFrame(animId);
+  }, [graphData, hoveredNode, selectedNode]);
 
   // 登录后加载数据
   const loadAppData = useCallback(async (user) => {
@@ -245,7 +627,9 @@ export default function App() {
           alert(result.error);
           return;
         }
+        setToken(result.token);
         setCurrentUser(result.user);
+        saveUserToStorage(result.user);
         await loadAppData(result.user);
         setAppView('onboarding');
       } catch (err) {
@@ -261,7 +645,9 @@ export default function App() {
           alert(result.error);
           return;
         }
+        setToken(result.token);
         setCurrentUser(result.user);
+        saveUserToStorage(result.user);
         await loadAppData(result.user);
         setAppView('app');
       } catch (err) {
@@ -292,6 +678,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    removeToken();
     setCurrentUser(null);
     setAppView('landing');
     setActiveTab('matches');
@@ -587,59 +974,48 @@ export default function App() {
               <button onClick={loadDiscoverGraph} className="px-6 py-2.5 bg-black text-white rounded-full font-bold text-sm hover:bg-gray-800 transition">重新搜索</button>
             </div>
           ) : (
-            <div className="w-full max-w-[750px] relative">
-              <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" style={{ maxHeight: '55vh' }}>
-                {/* 背景同心圆 */}
-                {[0.3, 0.6, 0.9].map((frac, i) => (
-                  <circle key={i} cx={cx} cy={cy} r={minR + (maxR - minR) * frac} fill="none" stroke="#e5e5e5" strokeWidth="1" strokeDasharray="4 4" />
-                ))}
-
-                {/* 连线 */}
-                {nodes.map((n, i) => (
-                  <line key={`line-${i}`} x1={cx} y1={cy} x2={n.x} y2={n.y} {...lineProps(n.matchScore || 0.1)} style={{ transition: 'all 0.3s' }} />
-                ))}
-
-                {/* 中心节点 (当前用户) */}
-                <g>
-                  <circle cx={cx} cy={cy} r={30} fill="white" stroke="black" strokeWidth="3" />
-                  <image href={centerUser.avatar} x={cx - 24} y={cy - 24} width={48} height={48} clipPath="circle(24px at 24px 24px)" preserveAspectRatio="xMidYMid slice" />
-                  <text x={cx} y={cy + 44} textAnchor="middle" className="text-[11px] font-bold fill-black">{centerUser.name}</text>
-                </g>
-
-                {/* 外围节点 */}
-                {nodes.map((n, i) => {
-                  const isHovered = hoveredNode?.id === n.id;
-                  const isSelected = selectedNode?.id === n.id;
-                  const s = isHovered || isSelected ? n.size * 1.2 : n.size;
-                  return (
-                    <g key={n.id}
-                      style={{ cursor: 'pointer', transition: 'transform 0.3s ease' }}
-                      onMouseEnter={(e) => { setHoveredNode(n); setTooltipPos({ x: n.x, y: n.y }); }}
-                      onMouseLeave={() => setHoveredNode(null)}
-                      onClick={() => setSelectedNode(n)}>
-                      {/* 光晕效果 */}
-                      {(isHovered || isSelected) && <circle cx={n.x} cy={n.y} r={s + 6} fill="rgba(0,0,0,0.06)" />}
-                      {/* 节点圆 */}
-                      <circle cx={n.x} cy={n.y} r={s} fill="white" stroke={isSelected ? '#e11d48' : '#ddd'} strokeWidth={isSelected ? 3 : 1.5} />
-                      <image href={n.photos?.[0] || n.avatar} x={n.x - s + 3} y={n.y - s + 3} width={(s - 3) * 2} height={(s - 3) * 2}
-                        clipPath={`circle(${s - 3}px at ${s - 3}px ${s - 3}px)`} preserveAspectRatio="xMidYMid slice" />
-                      {/* 匹配分数 */}
-                      <text x={n.x} y={n.y + s + 14} textAnchor="middle" className="text-[10px] font-bold" fill={isHovered ? '#e11d48' : '#666'}>
-                        {Math.round((n.matchScore || 0) * 100)}%
-                      </text>
-                      {/* 悬停提示 */}
-                      {isHovered && !isSelected && (
-                        <g>
-                          <rect x={n.x - 50} y={n.y - s - 34} width={100} height={24} rx={6} fill="black" fillOpacity={0.85} />
-                          <text x={n.x} y={n.y - s - 18} textAnchor="middle" className="text-[11px] font-bold" fill="white">
-                            {n.name} · {n.age}岁
-                          </text>
-                        </g>
-                      )}
-                    </g>
-                  );
-                })}
-              </svg>
+            <div className="w-full max-w-[950px] relative" style={{ height: '72vh', minHeight: 400 }}>
+              <canvas
+                ref={canvasRef}
+                className="w-full h-full cursor-pointer"
+                onMouseMove={(e) => {
+                  const canvas = canvasRef.current;
+                  if (!canvas) return;
+                  const rect = canvas.getBoundingClientRect();
+                  const scaleX = canvas.width / (window.devicePixelRatio || 1) / rect.width;
+                  const scaleY = canvas.height / (window.devicePixelRatio || 1) / rect.height;
+                  const mx = (e.clientX - rect.left) * scaleX;
+                  const my = (e.clientY - rect.top) * scaleY;
+                  const positions = nodePositionsRef.current;
+                  let found = null;
+                  for (let i = positions.length - 1; i >= 0; i--) {
+                    const n = positions[i];
+                    const dist = Math.sqrt((mx - n.px) ** 2 + (my - n.py) ** 2);
+                    if (dist <= n.size + 10) { found = n; break; }
+                  }
+                  setHoveredNode(found);
+                  canvas.style.cursor = found ? 'pointer' : 'default';
+                }}
+                onMouseLeave={() => setHoveredNode(null)}
+                onClick={(e) => {
+                  const canvas = canvasRef.current;
+                  if (!canvas) return;
+                  const rect = canvas.getBoundingClientRect();
+                  const scaleX = canvas.width / (window.devicePixelRatio || 1) / rect.width;
+                  const scaleY = canvas.height / (window.devicePixelRatio || 1) / rect.height;
+                  const mx = (e.clientX - rect.left) * scaleX;
+                  const my = (e.clientY - rect.top) * scaleY;
+                  const positions = nodePositionsRef.current;
+                  let found = null;
+                  for (let i = positions.length - 1; i >= 0; i--) {
+                    const n = positions[i];
+                    const dist = Math.sqrt((mx - n.px) ** 2 + (my - n.py) ** 2);
+                    if (dist <= n.size + 10) { found = n; break; }
+                  }
+                  if (found) setSelectedNode(found);
+                  else setSelectedNode(null);
+                }}
+              />
             </div>
           )}
 
@@ -1284,6 +1660,69 @@ export default function App() {
   );
 
   // ============================================================
+  // Markdown 渲染辅助
+  // ============================================================
+  const renderMarkdown = (text) => {
+    if (!text) return null;
+    const lines = text.split('\n');
+    const elements = [];
+    let i = 0;
+    let key = 0;
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // 空行跳过
+      if (!line.trim()) { i++; continue; }
+
+      // **标题**（加粗行单独成段）
+      const boldMatch = line.match(/^\*\*(.+)\*\*$/);
+      if (boldMatch) {
+        elements.push(<h3 key={key++} className="text-xl font-serif font-bold text-black mt-8 mb-3">{boldMatch[1]}</h3>);
+        i++; continue;
+      }
+
+      // 列表项（连续的 - 开头行合并为 ul）
+      if (line.trim().startsWith('- ')) {
+        const items = [];
+        while (i < lines.length && lines[i].trim().startsWith('- ')) {
+          const itemText = lines[i].trim().slice(2);
+          // 处理列表项内的加粗
+          const parts = itemText.split(/\*\*(.+?)\*\*/);
+          items.push(
+            <li key={items.length} className="flex items-start gap-3 py-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-black mt-2.5 shrink-0"></span>
+              <span>{parts.map((p, idx) => idx % 2 === 1 ? <strong key={idx} className="font-bold text-black">{p}</strong> : p)}</span>
+            </li>
+          );
+          i++;
+        }
+        elements.push(<ul key={key++} className="space-y-1 mb-4">{items}</ul>);
+        continue;
+      }
+
+      // 普通段落（连续非空行合并）
+      const paraLines = [];
+      while (i < lines.length && lines[i].trim() && !lines[i].trim().startsWith('- ') && !lines[i].match(/^\*\*.+\*\*$/)) {
+        paraLines.push(lines[i]);
+        i++;
+      }
+      if (paraLines.length > 0) {
+        const paraText = paraLines.join('\n');
+        // 处理行内加粗
+        const parts = paraText.split(/\*\*(.+?)\*\*/);
+        elements.push(
+          <p key={key++} className="text-gray-700 leading-relaxed text-base mb-4">
+            {parts.map((p, idx) => idx % 2 === 1 ? <strong key={idx} className="font-bold text-black">{p}</strong> : p)}
+          </p>
+        );
+      }
+    }
+
+    return <>{elements}</>;
+  };
+
+  // ============================================================
   // Landing 子页面：关于我们 / 安全指南 / 社团活动 / 周边商店
   // ============================================================
   const renderLandingSubView = () => {
@@ -1301,15 +1740,29 @@ export default function App() {
         </div>
         <div className="flex-1 p-6 md:p-10 max-w-4xl mx-auto w-full">
           {landingSubView === 'about' && landingData.about && (
-            <div className="bg-white rounded-2xl p-8 md:p-12 shadow-sm border border-gray-100">
-              <h2 className="text-3xl font-serif font-bold text-black mb-6">{landingData.about.title}</h2>
-              <div className="text-gray-700 leading-relaxed whitespace-pre-line text-lg">{landingData.about.content}</div>
+            <div>
+              {/* Hero Banner */}
+              <div className="bg-black rounded-2xl p-8 md:p-12 mb-8 text-white">
+                <h2 className="text-3xl md:text-4xl font-serif font-bold mb-4">{landingData.about.title}</h2>
+                <p className="text-gray-300 text-lg font-serif">专属于 BIUH 学生的校园社交平台</p>
+              </div>
+              {/* Content */}
+              <div className="bg-white rounded-2xl p-8 md:p-12 shadow-sm border border-gray-100">
+                {renderMarkdown(landingData.about.content)}
+              </div>
             </div>
           )}
           {landingSubView === 'safety' && landingData.safety && (
-            <div className="bg-white rounded-2xl p-8 md:p-12 shadow-sm border border-gray-100">
-              <h2 className="text-3xl font-serif font-bold text-black mb-6">{landingData.safety.title}</h2>
-              <div className="text-gray-700 leading-relaxed whitespace-pre-line text-lg">{landingData.safety.content}</div>
+            <div>
+              {/* Hero Banner */}
+              <div className="bg-black rounded-2xl p-8 md:p-12 mb-8 text-white">
+                <h2 className="text-3xl md:text-4xl font-serif font-bold mb-4">{landingData.safety.title}</h2>
+                <p className="text-gray-300 text-lg font-serif">保护每一位同学的交友安全</p>
+              </div>
+              {/* Content */}
+              <div className="bg-white rounded-2xl p-8 md:p-12 shadow-sm border border-gray-100">
+                {renderMarkdown(landingData.safety.content)}
+              </div>
             </div>
           )}
           {landingSubView === 'clubs' && (
